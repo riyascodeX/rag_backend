@@ -1,4 +1,4 @@
-const { OpenAI } = require("openai");
+/* const { OpenAI } = require("openai");
 async function createEmbedings(text) {
   try {
     const openai = new OpenAI({
@@ -13,6 +13,28 @@ async function createEmbedings(text) {
     return embeddings;
   } catch (error) {
     throw new Error(error);
+  }
+}
+
+module.exports = { createEmbedings }; */
+
+
+
+
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const model = genAI.getGenerativeModel({
+  model: "text-embedding-004",
+});
+
+async function createEmbedings(text) {
+  try {
+    const result = await model.embedContent(text);
+    return result.embedding.values; // vector array
+  } catch (error) {
+    throw new Error(error.message);
   }
 }
 

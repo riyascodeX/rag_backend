@@ -2,8 +2,18 @@ var express = require("express");
 var router = express.Router();
 const { MongoClient, ObjectId } = require("mongodb");
 const { createEmbedings } = require("./embedings");
-const {OpenAI} = require("openai")
+//const {OpenAI} = require("openai")
 const fs = require("fs");
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const chatModel = genAI.getGenerativeModel({
+  model: "gemini-1.5-flash",
+});
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
 var PDFParser = require("pdf2json");
 const parser = new PDFParser(this, 1);
@@ -35,14 +45,28 @@ router.post("/load-document", async (req, res) => {
       const db = connection.db("rag_doc");
       const collection = db.collection("docs");
 
-      for (line of splitContent) {
+      /* for (line of splitContent) {
         const embedings = await createEmbedings(line);
         await collection.insertOne({
           text: line,
           embedding: embedings.data[0].embedding,
         });
         console.log(line);
+      } */
+
+       /////////////////////////////////////////////////////////////////////////////////////////////////
+      for (let line of splitContent) {
+      const embedding = await createEmbedings(line);
+
+       await collection.insertOne({
+      text: line,
+      embedding: embedding, // direct vector
+      });
+      console.log(line)
       }
+      //////////////////////////////////////////////////////////////////////////////////////////////////
+
+
       await connection.close();
       res.json("Done");
     });
@@ -52,7 +76,7 @@ router.post("/load-document", async (req, res) => {
   }
 });
 
-router.get("/embeddings", async (req, res) => {
+/* router.get("/embeddings", async (req, res) => {
   try {
     const embedings = await createEmbedings("Hello World");
     res.json(embedings);
@@ -60,9 +84,25 @@ router.get("/embeddings", async (req, res) => {
     console.log(error);
     res.status(500).json({ meesage: "Error" });
   }
-});
+}); */
 
-router.post("/conversation", async (req, res) => {
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+router.get("/embeddings", async (req, res) => {
+  try {
+    const embedding = await createEmbedings("Hello World");
+
+    res.json({
+      length: embedding.length,
+      sample: embedding.slice(0, 5),
+    });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ message: "Embedding error" });
+  }
+});
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/* router.post("/conversation", async (req, res) => {
   try {
     let sessionId = req.body.sessionId;
     const connection = await MongoClient.connect(process.env.DB);
@@ -162,3 +202,85 @@ router.post("/conversation", async (req, res) => {
 });
 
 module.exports = router;
+ */
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+router.post("/conversation", async (req, res) => {
+  try {
+    let sessionId = req.body.sessionId;
+    const message = req.body.message;
+
+    const connection = await MongoClient.connect(process.env.DB);
+    const db = connection.db("rag_doc");
+
+    // Session create
+    if (!sessionId) {
+      const sessionCol = db.collection("sessions");
+      const sessionData = await sessionCol.insertOne({
+        createdAt: new Date(),
+      });
+      sessionId = sessionData._id;
+    }
+
+    // Save user message
+    const conCollection = db.collection("conversation");
+    await conCollection.insertOne({
+      sessionId,
+      message,
+      role: "USER",
+      createdAt: new Date(),
+    });
+
+    // 🔑 EMBEDDING (Gemini)
+    const messageVector = await createEmbedings(message); // ARRAY
+
+    // 🔍 VECTOR SEARCH
+    const docsCollection = db.collection("docs");
+    const vectorSearch = await docsCollection.aggregate([
+      {
+        $vectorSearch: {
+          index: "default",
+          path: "embedding",
+          queryVector: messageVector, // ✅ FIX
+          numCandidates: 150,
+          limit: 5,
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          text: 1,
+          score: { $meta: "vectorSearchScore" },
+        },
+      },
+    ]);
+
+    let finalResult = [];
+    for await (let doc of vectorSearch) {
+      finalResult.push(doc);
+    }
+
+    // 🤖 GEMINI CHAT
+    const prompt = `
+Answer the question using ONLY the context below.
+
+CONTEXT:
+${finalResult.map(doc => doc.text).join("\n")}
+
+QUESTION:
+${message}
+`;
+
+    const result = await chatModel.generateContent(prompt);
+    const answer = result.response.text();
+
+    await connection.close();
+    return res.json({ answer });
+
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
+});
+module.exports = router;
+/////////////////////////////////////////////////////////////////////////////////////////////////////
