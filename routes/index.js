@@ -1,105 +1,170 @@
 var express = require("express");
 var router = express.Router();
 const { MongoClient, ObjectId } = require("mongodb");
-const { createEmbedings } = require("./embedings");
-//const {OpenAI} = require("openai")
-const fs = require("fs");
+const fs=require("fs")
+const { execSync } = require("child_process");
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
+/* const { GoogleGenerativeAI } = require("@google/generative-ai");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
 const chatModel = genAI.getGenerativeModel({
   model: "gemini-1.5-flash",
-});
-/////////////////////////////////////////////////////////////////////////////////////////////////
+}); */
+
 
 var PDFParser = require("pdf2json");
 const parser = new PDFParser(this, 1);
 
+
 /* GET home page. */
-router.get("/", async function (req, res, next) {
+router.get("/", async (req, res) => {
   try {
-    const connection = await MongoClient.connect(process.env.DB);
-    const db = connection.db("rag_doc");
-    const collection = db.collection("docs");
-    await collection.insertOne({ test: "Success" });
-    await connection.close();
-    res.json({ title: "Express" });
-  } catch (error) {
-    console.log(error);
+    const client = new MongoClient(process.env.DB);
+    await client.connect();
+
+    const db = client.db("rag_doc");
+    await db.collection("test").insertOne({ status: "OK" });
+
+    await client.close();
+
+    res.json({ message: "MongoDB Community Server Connected ✅" });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "MongoDB Connection Failed ❌" });
   }
 });
+
+
+
+
 
 router.post("/load-document", async (req, res) => {
   try {
-    parser.loadPDF("./docs/policy.pdf");
-    parser.on("pdfParser_dataReady", async (data) => {
-      await fs.writeFileSync("./context.txt", parser.getRawTextContent());
+    parser.loadPDF("./docs/amcpdf2.pdf");
 
-      const content = await fs.readFileSync("./context.txt", "utf-8");
-      const splitContent = content.split("\n");
+    parser.once("pdfParser_dataReady", async () => {
+      try {
+        const content = parser.getRawTextContent();
 
-      const connection = await MongoClient.connect(process.env.DB);
-      const db = connection.db("rag_doc");
-      const collection = db.collection("docs");
+        const splitContent = content
+          .split("\n")
+          .map(line => line.trim())
+          .filter(line => line.length > 5);
 
-      /* for (line of splitContent) {
-        const embedings = await createEmbedings(line);
-        await collection.insertOne({
-          text: line,
-          embedding: embedings.data[0].embedding,
+        if (splitContent.length === 0) {
+          return res.status(400).json({ message: "No valid text found" });
+        }
+
+        // MongoDB connect (optional – embed.py itself inserts)
+        const client = await MongoClient.connect(process.env.DB);
+        const db = client.db("rag_doc");
+        const collection = db.collection("docs");
+
+        // OPTIONAL: clear old docs (first time only)
+        // await collection.deleteMany({});
+
+        for (let line of splitContent) {
+          // quotes break aagama irukka
+          const safeLine = line.replace(/"/g, "");
+
+          // 🔥 LOCAL EMBEDDING (Python)
+          execSync(`python embed.py "${safeLine}"`, {
+            stdio: "inherit"
+          });
+        }
+
+        await client.close();
+
+        res.json({
+          message: "Document loaded successfully (LOCAL EMBEDDINGS)",
+          chunks: splitContent.length
         });
-        console.log(line);
-      } */
 
-       /////////////////////////////////////////////////////////////////////////////////////////////////
-      for (let line of splitContent) {
-      const embedding = await createEmbedings(line);
-
-       await collection.insertOne({
-      text: line,
-      embedding: embedding, // direct vector
-      });
-      console.log(line)
+      } catch (err) {
+        console.error("Processing error:", err);
+        res.status(500).json({ message: "Embedding failed" });
       }
-      //////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-      await connection.close();
-      res.json("Done");
     });
+
+    parser.once("pdfParser_dataError", err => {
+      console.error("PDF error:", err);
+      res.status(500).json({ message: "PDF parse error" });
+    });
+
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Error" });
+    console.error("Route error:", error);
+    res.status(500).json({ message: "Error loading document" });
   }
 });
 
-/* router.get("/embeddings", async (req, res) => {
+
+
+/* router.post("/load-document", async (req, res) => {
   try {
-    const embedings = await createEmbedings("Hello World");
-    res.json(embedings);
+    parser.loadPDF("./docs/amcpdf2.pdf");
+
+    parser.once("pdfParser_dataReady", async () => {
+      try {
+        const content = parser.getRawTextContent();
+
+        const splitContent = content
+          .split("\n")
+          .map(line => line.trim())
+          .filter(line => line.length > 5);
+
+        if (splitContent.length === 0) {
+          return res.status(400).json({ message: "No valid text found" });
+        }
+
+        const client = await MongoClient.connect(process.env.DB);
+        const db = client.db("rag_doc");
+        const collection = db.collection("docs");
+
+        const documents = [];
+
+        const limitedContent = splitContent.slice(0, 50); // 👈 LIMIT
+
+        for (let line of limitedContent) {
+          const embedding = await createEmbedings(line);
+
+          documents.push({
+            text: line,
+            embedding: embedding
+          });
+
+          await sleep(700); // 👈 DELAY
+        }
+
+        await collection.insertMany(documents);
+        await client.close();
+
+        res.json({
+          message: "Document loaded successfully",
+          chunks: documents.length
+        });
+
+      } catch (err) {
+        console.error("Processing error:", err);
+        res.status(500).json({ message: "Embedding failed" });
+      }
+    });
+
+    parser.once("pdfParser_dataError", err => {
+      console.error("PDF error:", err);
+      res.status(500).json({ message: "PDF parse error" });
+    });
+
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ meesage: "Error" });
+    console.error("Route error:", error);
+    res.status(500).json({ message: "Error loading document" });
   }
 }); */
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////
-router.get("/embeddings", async (req, res) => {
-  try {
-    const embedding = await createEmbedings("Hello World");
 
-    res.json({
-      length: embedding.length,
-      sample: embedding.slice(0, 5),
-    });
-  } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Embedding error" });
-  }
-});
+
+
+
+
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /* router.post("/conversation", async (req, res) => {
@@ -205,7 +270,7 @@ module.exports = router;
  */
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
-router.post("/conversation", async (req, res) => {
+/* router.post("/conversation", async (req, res) => {
   try {
     let sessionId = req.body.sessionId;
     const message = req.body.message;
@@ -282,5 +347,91 @@ ${message}
     res.status(500).json({ message: "Something went wrong" });
   }
 });
+
+module.exports = router; */
+
+
+
+router.post("/conversation", async (req, res) => {
+  try {
+    let sessionId = req.body.sessionId;
+    const message = req.body.message;
+
+    const client = await MongoClient.connect(process.env.DB);
+    const db = client.db("rag_doc");
+
+    // Session create
+    if (!sessionId) {
+      const sessionCol = db.collection("sessions");
+      const sessionData = await sessionCol.insertOne({
+        createdAt: new Date(),
+      });
+      sessionId = sessionData._id;
+    }
+
+    // Save user message
+    const conCollection = db.collection("conversation");
+    await conCollection.insertOne({
+      sessionId,
+      message,
+      role: "USER",
+      createdAt: new Date(),
+    });
+
+    // 🔑 LOCAL EMBEDDING (Python)
+    const safeMsg = message.replace(/"/g, "");
+    const embeddingOutput = execSync(
+      `python embed_query.py "${safeMsg}"`
+    ).toString();
+
+    const queryVector = JSON.parse(embeddingOutput);
+
+    // 📥 Fetch all docs
+    const docs = await db.collection("docs").find().toArray();
+
+    // 📐 Cosine similarity
+    function cosineSimilarity(a, b) {
+      let dot = 0, normA = 0, normB = 0;
+      for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        normA += a[i] * a[i];
+        normB += b[i] * b[i];
+      }
+      return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+    const ranked = docs
+      .map(doc => ({
+        text: doc.text,
+        score: cosineSimilarity(queryVector, doc.embedding),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+
+    // 🤖 GEMINI CHAT (ONLY ONCE)
+    const prompt = `
+Answer the question using ONLY the context below.
+
+CONTEXT:
+${ranked.map(d => d.text).join("\n")}
+
+QUESTION:
+${message}
+`;
+
+    const result = await chatModel.generateContent(prompt);
+    const answer = result.response.text();
+
+    await client.close();
+    res.json({ answer });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Conversation failed" });
+  }
+});
+
 module.exports = router;
+
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////
